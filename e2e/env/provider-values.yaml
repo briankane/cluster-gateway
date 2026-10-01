@@ -1,0 +1,5 @@
+credentialPlugins:
+  custom:
+    - name: credential-plugin-tokenrequest
+      image: oamdev/cluster-gateway-e2e-plugin-tokenrequest:latest
+      imagePullPolicy: IfNotPresent

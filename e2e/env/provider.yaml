@@ -1,0 +1,33 @@
+# Environment for the Provider credential e2e: the tokenrequest test plugin mints
+# tokens for e2e-provider-spoke, and the gateway's ServiceAccount may mint for
+# that one ServiceAccount only.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: e2e-provider-spoke
+  namespace: vela-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: e2e-provider-token-minter
+  namespace: vela-system
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["e2e-provider-spoke"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: e2e-provider-token-minter
+  namespace: vela-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: e2e-provider-token-minter
+subjects:
+  - kind: ServiceAccount
+    name: cluster-gateway
+    namespace: vela-system

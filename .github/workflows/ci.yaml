@@ -76,6 +76,28 @@ jobs:
       - name: Run Make
         run: make
 
+  test-credential-plugins:
+    runs-on: ubuntu-22.04
+    needs: detect-noop
+    if: needs.detect-noop.outputs.noop != 'true'
+    strategy:
+      matrix:
+        plugin: [aws]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: plugins/${{ matrix.plugin }}/go.mod
+      - name: Test
+        working-directory: plugins/${{ matrix.plugin }}
+        run: |
+          go vet ./...
+          go test -race ./...
+      - name: Build image
+        run: docker build -f plugins/${{ matrix.plugin }}/Dockerfile .
+
   e2e-cluster-gateway:
     runs-on: ubuntu-22.04
     needs: detect-noop
@@ -104,16 +126,21 @@ jobs:
       - name: Build Image
         run: |
           make image
+          docker build -t oamdev/cluster-gateway-e2e-plugin-tokenrequest:latest -f e2e/plugins/tokenrequest/Dockerfile .
           kind load docker-image oamdev/cluster-gateway:latest --name chart-testing
+          kind load docker-image oamdev/cluster-gateway-e2e-plugin-tokenrequest:latest --name chart-testing
       - name: Prepare ClusterGateway E2E Environment
         run: |
           helm install --create-namespace -n vela-system \
             cluster-gateway ./charts/cluster-gateway \
             --set featureGate.healthiness=true \
             --set featureGate.secretCache=true \
-            --set tag=latest
+            --set tag=latest \
+            -f e2e/env/provider-values.yaml
           kubectl wait --for=condition=Available apiservice/v1alpha1.cluster.core.oam.dev
+          kubectl apply -f e2e/env/provider.yaml
           go run ./e2e/env/prepare | kubectl apply -f -
+          go run ./e2e/env/prepare --cluster-name=loopback-provider --credential-provider=tokenrequest | kubectl apply -f -
       - name: Run Make test
         run: |
           kubectl get clustergateway

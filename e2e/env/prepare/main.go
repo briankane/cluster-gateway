@@ -19,6 +19,7 @@ func main() {
 
 	var clusterName string
 	var secretNamespace string
+	var credentialProvider string
 	var dryRun bool
 
 	flag.StringVar(&secretNamespace, "secret-namespace", "open-cluster-management-credentials",
@@ -27,6 +28,8 @@ func main() {
 		"Target name of the secret.")
 	flag.BoolVar(&dryRun, "dry-run", false,
 		"Whether to dry run")
+	flag.StringVar(&credentialProvider, "credential-provider", "",
+		"register the cluster with the Provider credential type, using this credential plugin")
 	flag.Parse()
 
 	kubeconfigPath := os.Getenv("KUBECONFIG")
@@ -53,7 +56,10 @@ func main() {
 			"endpoint": []byte("https://kubernetes.default.svc.cluster.local:443"),
 		},
 	}
-	if len(restConfig.BearerToken) > 0 {
+	if len(credentialProvider) > 0 {
+		secret.Labels[common.LabelKeyClusterCredentialType] = string(v1alpha1.CredentialTypeProvider)
+		secret.Data["provider"] = []byte(credentialProvider)
+	} else if len(restConfig.BearerToken) > 0 {
 		// TODO
 	} else {
 		secret.Labels[common.LabelKeyClusterCredentialType] = string(v1alpha1.CredentialTypeX509Certificate)

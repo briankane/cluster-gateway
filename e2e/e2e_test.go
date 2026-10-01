@@ -9,6 +9,7 @@ import (
 
 	"github.com/oam-dev/cluster-gateway/e2e/framework"
 	// per-package e2e suite
+	_ "github.com/oam-dev/cluster-gateway/e2e/provider"
 	_ "github.com/oam-dev/cluster-gateway/e2e/roundtrip"
 )
 
