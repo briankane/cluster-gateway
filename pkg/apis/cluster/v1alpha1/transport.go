@@ -95,7 +95,7 @@ func NewConfigFromCluster(ctx context.Context, c *ClusterGateway) (*restclient.C
 	}
 	// setting up credentials
 	switch c.Spec.Access.Credential.Type {
-	case CredentialTypeDynamic:
+	case CredentialTypeDynamic, CredentialTypeProvider:
 		if token := c.Spec.Access.Credential.ServiceAccountToken; token != "" {
 			cfg.BearerToken = token
 		}

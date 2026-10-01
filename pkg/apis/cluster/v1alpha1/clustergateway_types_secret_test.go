@@ -2,10 +2,17 @@ package v1alpha1
 
 import (
 	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/oam-dev/cluster-gateway/pkg/common"
 	"github.com/oam-dev/cluster-gateway/pkg/config"
+	cpapi "github.com/oam-dev/cluster-gateway/pkg/credentialprovider/api"
 	"github.com/oam-dev/cluster-gateway/pkg/featuregates"
 	"github.com/oam-dev/cluster-gateway/pkg/options"
 	"github.com/oam-dev/cluster-gateway/pkg/util/cert"
@@ -802,4 +809,82 @@ func TestClusterGatewayGetWithCredential(t *testing.T) {
 
 	_, err = storage.getWithCredential(context.TODO(), "dynamic-broken")
 	assert.ErrorContains(t, err, "failed to issue credential from external command")
+}
+
+func TestConvertProviderSecret(t *testing.T) {
+	gw, err := convertFromSecret(newClusterSecret("eks", CredentialTypeProvider, map[string][]byte{
+		"provider":        []byte("aws"),
+		"provider-config": []byte(`{"region":"eu-west-1"}`),
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, &ClusterAccessCredential{Type: CredentialTypeProvider, Provider: "aws"}, gw.Spec.Access.Credential)
+
+	_, err = convertFromSecret(newClusterSecret("eks", CredentialTypeProvider, map[string][]byte{}))
+	assert.ErrorContains(t, err, "missing secret data key: provider")
+
+	_, err = convertFromSecret(newClusterSecret("eks", CredentialTypeProvider, map[string][]byte{
+		"provider":        []byte("aws"),
+		"provider-config": []byte(`["not", "an", "object"]`),
+	}))
+	assert.ErrorContains(t, err, "provider-config must be a JSON object")
+}
+
+// startProviderPlugin serves a fake credential plugin named name in a fresh
+// plugin directory and points the gateway at it.
+func startProviderPlugin(t *testing.T, name string, handler http.HandlerFunc) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "cgp")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	l, err := net.Listen("unix", filepath.Join(dir, name+".sock"))
+	require.NoError(t, err)
+	srv := &http.Server{Handler: handler}
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	prev := config.CredentialPluginDir
+	config.CredentialPluginDir = dir
+	t.Cleanup(func() { config.CredentialPluginDir = prev })
+}
+
+func TestClusterGatewayProviderCredential(t *testing.T) {
+	options.OCMIntegration = false
+	config.SecretNamespace = testNamespace
+	var received cpapi.CredentialRequest
+	startProviderPlugin(t, "aws", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&received)
+		expiry := time.Now().Add(15 * time.Minute)
+		_ = json.NewEncoder(w).Encode(&cpapi.ExecCredential{
+			APIVersion: cpapi.ExecCredentialAPIVersion,
+			Kind:       cpapi.ExecCredentialKind,
+			Status:     &cpapi.ExecCredentialStatus{Token: "k8s-aws-v1.minted", ExpirationTimestamp: &expiry},
+		})
+	})
+	insecure := newClusterSecret("insecure", CredentialTypeProvider, map[string][]byte{"provider": []byte("aws")})
+	delete(insecure.Data, "ca.crt")
+	fakeKubeClient := fake.NewSimpleClientset(
+		newClusterSecret("eks", CredentialTypeProvider, map[string][]byte{
+			"provider":        []byte("aws"),
+			"provider-config": []byte(`{"region":"eu-west-1"}`),
+		}),
+		insecure,
+	)
+	singleton.SetSecretControl(cert.NewDirectApiSecretControl(testNamespace, fakeKubeClient))
+	storage := &ClusterGateway{}
+
+	raw, err := storage.Get(context.TODO(), "eks", &metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, &ClusterAccessCredential{Type: CredentialTypeProvider, Provider: "aws"}, raw.(*ClusterGateway).Spec.Access.Credential)
+
+	gw, err := storage.getWithCredential(context.TODO(), "eks")
+	require.NoError(t, err)
+	assert.Equal(t, &ClusterAccessCredential{Type: CredentialTypeProvider, Provider: "aws", ServiceAccountToken: "k8s-aws-v1.minted"}, gw.Spec.Access.Credential)
+	assert.Equal(t, "eks", received.Cluster)
+	assert.JSONEq(t, `{"region":"eu-west-1"}`, string(received.Config))
+
+	cfg, err := NewConfigFromCluster(context.TODO(), gw)
+	require.NoError(t, err)
+	assert.Equal(t, "k8s-aws-v1.minted", cfg.BearerToken)
+
+	_, err = storage.getWithCredential(context.TODO(), "insecure")
+	assert.ErrorContains(t, err, "requires a CA bundle")
 }

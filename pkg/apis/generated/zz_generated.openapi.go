@@ -235,6 +235,13 @@ func schema_pkg_apis_cluster_v1alpha1_ClusterAccessCredential(ref common.Referen
 							Format:      "",
 						},
 					},
+					"provider": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Provider names the credential plugin for the Provider type.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"serviceAccountToken": {
 						SchemaProps: spec.SchemaProps{
 							Type:   []string{"string"},

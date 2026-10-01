@@ -14,6 +14,7 @@ import (
 
 	"github.com/oam-dev/cluster-gateway/pkg/common"
 	"github.com/oam-dev/cluster-gateway/pkg/config"
+	"github.com/oam-dev/cluster-gateway/pkg/credentialprovider"
 	"github.com/oam-dev/cluster-gateway/pkg/featuregates"
 	"github.com/oam-dev/cluster-gateway/pkg/options"
 	"github.com/oam-dev/cluster-gateway/pkg/util/exec"
@@ -41,6 +42,12 @@ var _ rest.Lister = &ClusterGateway{}
 //
 // NOTE: Because the secret resource is designed to have no "metadata.generation" field,
 // the ClusterGateway resource also misses the generation tracking.
+// Secret data keys for the Provider credential type.
+const (
+	secretKeyProvider       = "provider"
+	secretKeyProviderConfig = "provider-config"
+)
+
 const (
 	AnnotationKeyClusterGatewayStatusHealthy       = "status.cluster.core.oam.dev/healthy"
 	AnnotationKeyClusterGatewayStatusHealthyReason = "status.cluster.core.oam.dev/healthy-reason"
@@ -61,14 +68,42 @@ func (in *ClusterGateway) getWithCredential(ctx context.Context, name string) (*
 	if err != nil {
 		return nil, err
 	}
-	if gw.Spec.Access.Credential != nil && gw.Spec.Access.Credential.Type == CredentialTypeDynamic {
+	if gw.Spec.Access.Credential == nil {
+		return gw, nil
+	}
+	switch gw.Spec.Access.Credential.Type {
+	case CredentialTypeDynamic:
 		credential, err := buildCredentialFromExecConfig(clusterSecret)
 		if err != nil {
 			return nil, fmt.Errorf("failed to issue credential from external command: %s", err)
 		}
 		gw.Spec.Access.Credential = credential
+	case CredentialTypeProvider:
+		credential, err := buildCredentialFromProvider(ctx, gw, clusterSecret)
+		if err != nil {
+			return nil, err
+		}
+		gw.Spec.Access.Credential = credential
 	}
 	return gw, nil
+}
+
+// buildCredentialFromProvider refuses endpoints without a CA bundle: a minted
+// credential must only ever be presented to a verified apiserver.
+func buildCredentialFromProvider(ctx context.Context, gw *ClusterGateway, secret *v1.Secret) (*ClusterAccessCredential, error) {
+	if ep := gw.Spec.Access.Endpoint; ep != nil && ep.Const != nil && ep.Const.Insecure != nil && *ep.Const.Insecure {
+		return nil, fmt.Errorf("cluster %s: the %s credential type requires a CA bundle", gw.Name, CredentialTypeProvider)
+	}
+	provider := gw.Spec.Access.Credential.Provider
+	cred, err := credentialprovider.ForDir(config.CredentialPluginDir).Get(ctx, provider, gw.Name, secret.Data[secretKeyProviderConfig])
+	if err != nil {
+		return nil, fmt.Errorf("cluster %s: %w", gw.Name, err)
+	}
+	out := &ClusterAccessCredential{Type: CredentialTypeProvider, Provider: provider, ServiceAccountToken: cred.Token}
+	if len(cred.Certificate) > 0 {
+		out.X509 = &X509{Certificate: cred.Certificate, PrivateKey: cred.PrivateKey}
+	}
+	return out, nil
 }
 
 func (in *ClusterGateway) get(ctx context.Context, name string) (*ClusterGateway, *v1.Secret, error) {
@@ -101,7 +136,10 @@ func (in *ClusterGateway) get(ctx context.Context, name string) (*ClusterGateway
 // read access to ClusterGateways does not grant access to the clusters behind them.
 func redactCredential(gw *ClusterGateway) *ClusterGateway {
 	if gw.Spec.Access.Credential != nil {
-		gw.Spec.Access.Credential = &ClusterAccessCredential{Type: gw.Spec.Access.Credential.Type}
+		gw.Spec.Access.Credential = &ClusterAccessCredential{
+			Type:     gw.Spec.Access.Credential.Type,
+			Provider: gw.Spec.Access.Credential.Provider,
+		}
 	}
 	return gw
 }
@@ -289,6 +327,19 @@ func convert(caData []byte, apiServerEndpoint string, insecure bool, secret *v1.
 
 	case CredentialTypeDynamic:
 		c.Spec.Access.Credential = &ClusterAccessCredential{Type: CredentialTypeDynamic}
+
+	case CredentialTypeProvider:
+		provider := string(secret.Data[secretKeyProvider])
+		if provider == "" {
+			return nil, fmt.Errorf("missing secret data key: %s", secretKeyProvider)
+		}
+		if raw, ok := secret.Data[secretKeyProviderConfig]; ok {
+			var obj map[string]interface{}
+			if err := json.Unmarshal(raw, &obj); err != nil {
+				return nil, fmt.Errorf("%s must be a JSON object: %v", secretKeyProviderConfig, err)
+			}
+		}
+		c.Spec.Access.Credential = &ClusterAccessCredential{Type: CredentialTypeProvider, Provider: provider}
 
 	default:
 		return nil, fmt.Errorf("unrecognized secret credential type %v", credentialType)

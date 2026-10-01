@@ -83,6 +83,10 @@ const (
 	// accessing the cluster. The generated credential can be either a service
 	// account token or X509 certificate and key.
 	CredentialTypeDynamic CredentialType = "Dynamic"
+	// CredentialTypeProvider means that a short-lived credential is requested
+	// from the named credential plugin before accessing the cluster, and kept
+	// only in memory.
+	CredentialTypeProvider CredentialType = "Provider"
 )
 
 type ClusterEndpointType string
@@ -118,9 +122,11 @@ type ClusterEndpointConst struct {
 
 type ClusterAccessCredential struct {
 	// Type is the union discriminator for credential contents.
-	Type                CredentialType `json:"type"`
-	ServiceAccountToken string         `json:"serviceAccountToken,omitempty"`
-	X509                *X509          `json:"x509,omitempty"`
+	Type CredentialType `json:"type"`
+	// Provider names the credential plugin for the Provider type.
+	Provider            string `json:"provider,omitempty"`
+	ServiceAccountToken string `json:"serviceAccountToken,omitempty"`
+	X509                *X509  `json:"x509,omitempty"`
 }
 
 type X509 struct {

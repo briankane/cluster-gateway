@@ -82,6 +82,7 @@ func main() {
 	}
 	config.AddLogFlags(cmd.Flags())
 	config.AddSecretFlags(cmd.Flags())
+	config.AddCredentialPluginFlags(cmd.Flags())
 	config.AddVirtualClusterFlags(cmd.Flags())
 	config.AddClusterProxyFlags(cmd.Flags())
 	config.AddProxyAuthorizationFlags(cmd.Flags())
