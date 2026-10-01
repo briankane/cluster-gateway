@@ -18,7 +18,9 @@ package eks
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,21 +68,28 @@ type providerConfig struct {
 type Options struct {
 	// Base supplies the pod's own credentials, normally IRSA or EKS Pod Identity.
 	Base aws.Config
-	// AllowPodIdentity lets clusters without a roleArn be signed with Base directly.
-	AllowPodIdentity bool
-	// AllowedRoleARNs lists role ARNs that may be assumed. An entry ending in
-	// ":role/*" allows every role in that account.
+	// AllowBaseIdentity lets clusters without a roleArn be signed with Base directly.
+	AllowBaseIdentity bool
+	// AllowedRoleARNs lists the roles that may be assumed. An entry containing
+	// ClusterPlaceholder in its role name matches only the role named for the
+	// requesting cluster, so no cluster can use another's role.
 	AllowedRoleARNs []string
-	// SessionName is the RoleSessionName for assumed roles, visible in CloudTrail
-	// and in the username EKS maps the identity to.
+	// SessionName prefixes the RoleSessionName, which is <SessionName>-<cluster>.
+	// It shows in CloudTrail and in the username EKS maps the identity to.
 	SessionName string
 }
 
+// ClusterPlaceholder stands for the ClusterGateway name in an allowlist entry.
+const ClusterPlaceholder = "{cluster}"
+
+// maxSessionName is the longest RoleSessionName STS accepts.
+const maxSessionName = 64
+
 // Minter mints EKS bearer tokens.
 type Minter struct {
-	opts         Options
-	exactRoles   map[string]bool
-	accountRoles []string
+	opts          Options
+	exactRoles    map[string]bool
+	roleTemplates []string
 
 	now func() time.Time
 	// assumeRoleEndpoint overrides the STS endpoint used for AssumeRole.
@@ -97,28 +106,46 @@ func NewMinter(opts Options) (*Minter, error) {
 		m.opts.SessionName = "cluster-gateway"
 	}
 	for _, entry := range opts.AllowedRoleARNs {
-		if prefix, ok := strings.CutSuffix(entry, ":role/*"); ok && rolePattern.MatchString(prefix+":role/x") {
-			m.accountRoles = append(m.accountRoles, prefix+":role/")
-			continue
+		if !rolePattern.MatchString(strings.ReplaceAll(entry, ClusterPlaceholder, "x")) {
+			return nil, fmt.Errorf("invalid allowlist entry %q: want a role ARN, optionally with %s in the role name", entry, ClusterPlaceholder)
 		}
-		if !rolePattern.MatchString(entry) {
-			return nil, fmt.Errorf("invalid allowlist entry %q: want a role ARN, or arn:<partition>:iam::<account>:role/* for every role in an account", entry)
+		switch strings.Count(entry, ClusterPlaceholder) {
+		case 0:
+			m.exactRoles[entry] = true
+		case 1:
+			if strings.Index(entry, ClusterPlaceholder) < strings.Index(entry, ":role/") {
+				return nil, fmt.Errorf("invalid allowlist entry %q: %s may only appear in the role name", entry, ClusterPlaceholder)
+			}
+			m.roleTemplates = append(m.roleTemplates, entry)
+		default:
+			return nil, fmt.Errorf("invalid allowlist entry %q: %s may appear only once", entry, ClusterPlaceholder)
 		}
-		m.exactRoles[entry] = true
 	}
 	return m, nil
 }
 
-func (m *Minter) roleAllowed(arn string) bool {
+func (m *Minter) roleAllowed(arn, cluster string) bool {
 	if m.exactRoles[arn] {
 		return true
 	}
-	for _, prefix := range m.accountRoles {
-		if strings.HasPrefix(arn, prefix) {
+	for _, tmpl := range m.roleTemplates {
+		if arn == strings.Replace(tmpl, ClusterPlaceholder, cluster, 1) {
 			return true
 		}
 	}
 	return false
+}
+
+// sessionName is <prefix>-<cluster>, shortened with a hash of the cluster name
+// when that exceeds what STS accepts, so distinct clusters stay distinct.
+func (m *Minter) sessionName(cluster string) string {
+	name := m.opts.SessionName + "-" + cluster
+	if len(name) <= maxSessionName {
+		return name
+	}
+	sum := sha256.Sum256([]byte(cluster))
+	suffix := "-" + hex.EncodeToString(sum[:4])
+	return name[:maxSessionName-len(suffix)] + suffix
 }
 
 // Mint returns a token for the EKS cluster described by req.Config.
@@ -131,11 +158,11 @@ func (m *Minter) Mint(ctx context.Context, req *api.CredentialRequest) (*api.Exe
 	creds := m.opts.Base.Credentials
 	switch {
 	case cfg.RoleARN != "":
-		if !m.roleAllowed(cfg.RoleARN) {
-			return nil, plugin.Forbidden(fmt.Errorf("roleArn %s is not in the allowlist", cfg.RoleARN))
+		if !m.roleAllowed(cfg.RoleARN, req.Cluster) {
+			return nil, plugin.Forbidden(fmt.Errorf("roleArn %s is not in the allowlist for cluster %s", cfg.RoleARN, req.Cluster))
 		}
-		creds = m.assumedRole(cfg.Region, cfg.RoleARN)
-	case !m.opts.AllowPodIdentity:
+		creds = m.assumedRole(cfg.Region, cfg.RoleARN, m.sessionName(req.Cluster))
+	case !m.opts.AllowBaseIdentity:
 		return nil, plugin.Forbidden(errors.New("roleArn is required: signing with the plugin's own identity is disabled"))
 	}
 
@@ -175,8 +202,8 @@ func parseConfig(raw json.RawMessage) (*providerConfig, error) {
 
 // assumedRole returns a cached provider for the role, which refreshes the
 // assumed credentials before they expire.
-func (m *Minter) assumedRole(region, roleARN string) aws.CredentialsProvider {
-	key := region + "|" + roleARN
+func (m *Minter) assumedRole(region, roleARN, session string) aws.CredentialsProvider {
+	key := region + "|" + roleARN + "|" + session
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if p, ok := m.roles[key]; ok {
@@ -189,7 +216,7 @@ func (m *Minter) assumedRole(region, roleARN string) aws.CredentialsProvider {
 		}
 	})
 	p := aws.NewCredentialsCache(stscreds.NewAssumeRoleProvider(client, roleARN, func(o *stscreds.AssumeRoleOptions) {
-		o.RoleSessionName = m.opts.SessionName
+		o.RoleSessionName = session
 	}))
 	m.roles[key] = p
 	return p

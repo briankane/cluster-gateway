@@ -95,8 +95,8 @@ func routeSTS(t *testing.T, srv *httptest.Server) {
 func mint(t *testing.T) string {
 	t.Helper()
 	m, err := eks.NewMinter(eks.Options{
-		AllowPodIdentity: true,
-		Base:             aws.Config{Credentials: credentials.StaticCredentialsProvider{Value: signingCreds}},
+		AllowBaseIdentity: true,
+		Base:              aws.Config{Credentials: credentials.StaticCredentialsProvider{Value: signingCreds}},
 	})
 	if err != nil {
 		t.Fatal(err)

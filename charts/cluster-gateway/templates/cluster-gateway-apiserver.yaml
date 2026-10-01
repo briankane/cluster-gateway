@@ -110,7 +110,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - --socket=/var/run/cluster-gateway/plugins/aws.sock
-            - --allow-pod-identity={{ $aws.allowPodIdentity }}
+            - --allow-base-identity={{ $aws.allowBaseIdentity }}
             - --allowed-role-arns={{ join "," $aws.allowedRoleArns }}
             - --session-name={{ $aws.sessionName }}
           env:

@@ -42,11 +42,15 @@ credentialPlugins:
       # Use an EKS Pod Identity association for this release's ServiceAccount.
       # The association itself is created in EKS, not by this chart.
       enabled: false
-    # Sign for clusters without a roleArn using the plugin's own identity.
-    allowPodIdentity: true
-    # Roles a cluster's provider-config may name as roleArn. An entry
-    # arn:aws:iam::<account>:role/* allows every role in that account.
+    # Sign for clusters without a roleArn using the plugin's own identity (the
+    # IRSA or Pod Identity role above). Off: each cluster assumes its own role.
+    allowBaseIdentity: false
+    # Roles a cluster's provider-config may name as roleArn. {cluster} in a role
+    # name matches only the requesting ClusterGateway's name, so a cluster cannot
+    # use another cluster's role, e.g.
+    #   - arn:aws:iam::222222222222:role/vela-{cluster}
     allowedRoleArns: []
+    # Prefix of the RoleSessionName, which is <sessionName>-<cluster>.
     sessionName: cluster-gateway
     resources: {}
   # Further plugins, each a container spec run as a sidecar. The socket volume is

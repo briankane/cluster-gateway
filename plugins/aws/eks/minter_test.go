@@ -75,7 +75,7 @@ func decodeToken(t *testing.T, token string) *url.URL {
 }
 
 func TestMintToken(t *testing.T) {
-	m := newTestMinter(t, Options{AllowPodIdentity: true})
+	m := newTestMinter(t, Options{AllowBaseIdentity: true})
 	status, err := m.Mint(context.Background(), request(`{"region":"eu-west-1","clusterName":"prod"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -105,8 +105,7 @@ func TestMintToken(t *testing.T) {
 
 func TestMintRejects(t *testing.T) {
 	m := newTestMinter(t, Options{
-		AllowPodIdentity: false,
-		AllowedRoleARNs:  []string{"arn:aws:iam::111111111111:role/vela-hub", "arn:aws:iam::222222222222:role/*"},
+		AllowedRoleARNs: []string{"arn:aws:iam::111111111111:role/vela-hub", "arn:aws:iam::222222222222:role/vela-{cluster}"},
 	})
 	cases := []struct {
 		name   string
@@ -121,9 +120,11 @@ func TestMintRejects(t *testing.T) {
 		{"bad region", `{"region":"EU WEST","clusterName":"prod"}`, "invalid region", false},
 		{"no cluster", `{"region":"eu-west-1"}`, "clusterName is required", false},
 		{"bad cluster", `{"region":"eu-west-1","clusterName":"prod/../x"}`, "invalid clusterName", false},
-		{"pod identity disabled", `{"region":"eu-west-1","clusterName":"prod"}`, "roleArn is required", true},
+		{"base identity disabled by default", `{"region":"eu-west-1","clusterName":"prod"}`, "roleArn is required", true},
 		{"role not allowed", `{"region":"eu-west-1","clusterName":"prod","roleArn":"arn:aws:iam::333333333333:role/x"}`, "not in the allowlist", true},
 		{"prefix is not a wildcard", `{"region":"eu-west-1","clusterName":"prod","roleArn":"arn:aws:iam::111111111111:role/vela-hub-admin"}`, "not in the allowlist", true},
+		{"another cluster's role", `{"region":"eu-west-1","clusterName":"prod","roleArn":"arn:aws:iam::222222222222:role/vela-prod-us"}`, "not in the allowlist", true},
+		{"template in another account", `{"region":"eu-west-1","clusterName":"prod","roleArn":"arn:aws:iam::333333333333:role/vela-prod-eu"}`, "not in the allowlist", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -139,7 +140,12 @@ func TestMintRejects(t *testing.T) {
 }
 
 func TestNewMinterValidatesAllowlist(t *testing.T) {
-	for _, entry := range []string{"", "*", "arn:aws:iam::*", "role/x", "arn:aws:iam::111111111111:role/a*b"} {
+	for _, entry := range []string{
+		"", "*", "arn:aws:iam::*", "role/x", "arn:aws:iam::111111111111:role/a*b",
+		"arn:aws:iam::111111111111:role/*",
+		"arn:aws:iam::{cluster}:role/x",
+		"arn:aws:iam::111111111111:role/{cluster}-{cluster}",
+	} {
 		if _, err := NewMinter(Options{AllowedRoleARNs: []string{entry}}); err == nil {
 			t.Errorf("allowlist entry %q accepted", entry)
 		}
@@ -177,12 +183,14 @@ func TestMintWithAssumedRole(t *testing.T) {
 	srv := fakeSTS(t, &calls, &gotRole)
 	defer srv.Close()
 
-	m := newTestMinter(t, Options{AllowedRoleARNs: []string{"arn:aws:iam::222222222222:role/*"}, SessionName: "cluster-gateway"})
+	m := newTestMinter(t, Options{AllowedRoleARNs: []string{"arn:aws:iam::222222222222:role/vela-{cluster}"}})
 	m.assumeRoleEndpoint = srv.URL
 
-	config := `{"region":"eu-west-1","clusterName":"prod","roleArn":"arn:aws:iam::222222222222:role/vela-hub"}`
-	for i := 0; i < 3; i++ {
-		status, err := m.Mint(context.Background(), request(config))
+	mint := func(cluster string) {
+		t.Helper()
+		req := request(`{"region":"eu-west-1","clusterName":"eks","roleArn":"arn:aws:iam::222222222222:role/vela-` + cluster + `"}`)
+		req.Cluster = cluster
+		status, err := m.Mint(context.Background(), req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -190,16 +198,43 @@ func TestMintWithAssumedRole(t *testing.T) {
 			t.Fatalf("token not signed with the assumed role: %q", cred)
 		}
 	}
-	if got := gotRole.Load(); got != "arn:aws:iam::222222222222:role/vela-hub|cluster-gateway" {
+
+	for i := 0; i < 3; i++ {
+		mint("prod-eu")
+	}
+	if got := gotRole.Load(); got != "arn:aws:iam::222222222222:role/vela-prod-eu|cluster-gateway-prod-eu" {
 		t.Errorf("AssumeRole called with %v", got)
 	}
 	if n := calls.Load(); n != 1 {
 		t.Errorf("assumed role credentials not cached: %d AssumeRole calls", n)
 	}
+
+	mint("prod-us")
+	if got := gotRole.Load(); got != "arn:aws:iam::222222222222:role/vela-prod-us|cluster-gateway-prod-us" {
+		t.Errorf("AssumeRole called with %v", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("want one AssumeRole per cluster, got %d calls", n)
+	}
+}
+
+func TestSessionName(t *testing.T) {
+	m := newTestMinter(t, Options{})
+	if got := m.sessionName("prod-eu"); got != "cluster-gateway-prod-eu" {
+		t.Errorf("got %q", got)
+	}
+	long1 := m.sessionName(strings.Repeat("a", 70) + "-one")
+	long2 := m.sessionName(strings.Repeat("a", 70) + "-two")
+	if len(long1) > 64 || len(long2) > 64 {
+		t.Errorf("session names exceed 64 characters: %d, %d", len(long1), len(long2))
+	}
+	if long1 == long2 {
+		t.Errorf("truncated session names collide: %q", long1)
+	}
 }
 
 func TestMintErrorsDoNotLeakCredentials(t *testing.T) {
-	m := newTestMinter(t, Options{AllowedRoleARNs: []string{"arn:aws:iam::222222222222:role/*"}})
+	m := newTestMinter(t, Options{AllowedRoleARNs: []string{"arn:aws:iam::222222222222:role/vela-hub"}})
 	m.assumeRoleEndpoint = "http://127.0.0.1:1"
 	_, err := m.Mint(context.Background(), request(`{"region":"eu-west-1","clusterName":"prod","roleArn":"arn:aws:iam::222222222222:role/vela-hub"}`))
 	if err == nil {

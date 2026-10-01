@@ -34,9 +34,9 @@ import (
 
 func main() {
 	socket := flag.String("socket", "/var/run/cluster-gateway/plugins/aws.sock", "unix socket to serve on")
-	allowPodIdentity := flag.Bool("allow-pod-identity", true, "sign for clusters without a roleArn using the pod's own AWS identity")
-	allowedRoles := flag.String("allowed-role-arns", "", "comma-separated role ARNs clusters may assume; arn:aws:iam::<account>:role/* allows every role in an account")
-	sessionName := flag.String("session-name", "cluster-gateway", "RoleSessionName for assumed roles")
+	allowBaseIdentity := flag.Bool("allow-base-identity", false, "sign for clusters without a roleArn using the plugin's own AWS identity (IRSA or EKS Pod Identity)")
+	allowedRoles := flag.String("allowed-role-arns", "", "comma-separated role ARNs clusters may assume; {cluster} in a role name matches only the requesting cluster's name, e.g. arn:aws:iam::123456789012:role/vela-{cluster}")
+	sessionName := flag.String("session-name", "cluster-gateway", "prefix of the RoleSessionName, which is <prefix>-<cluster>")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -52,12 +52,12 @@ func main() {
 			roles = append(roles, r)
 		}
 	}
-	m, err := eks.NewMinter(eks.Options{Base: base, AllowPodIdentity: *allowPodIdentity, AllowedRoleARNs: roles, SessionName: *sessionName})
+	m, err := eks.NewMinter(eks.Options{Base: base, AllowBaseIdentity: *allowBaseIdentity, AllowedRoleARNs: roles, SessionName: *sessionName})
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	log.Printf("serving on %s (pod identity allowed: %v, %d allowlist entries)", *socket, *allowPodIdentity, len(roles))
+	log.Printf("serving on %s (base identity allowed: %v, %d allowlist entries)", *socket, *allowBaseIdentity, len(roles))
 	if err := plugin.Serve(ctx, *socket, m); err != nil {
 		log.Print(err)
 		os.Exit(1)
