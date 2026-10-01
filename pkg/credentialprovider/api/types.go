@@ -21,6 +21,13 @@ limitations under the License.
 // CredentialRequest; a successful response is an ExecCredential with an
 // expirationTimestamp, the same shape a kubeconfig exec plugin prints. Any other
 // status carries an Error.
+//
+// A plugin may also ship a setup template: CUE in a ConfigMap labelled
+// cluster.core.oam.dev/credential-provider=<provider>, data key template.cue, in the
+// gateway's namespace. The vela CLI fills context.cluster and parameter (from
+// --param key=value, as strings), then reads providerConfig, which must be a
+// concrete object and becomes the cluster's provider-config, and setup, a list of
+// {title: string, commands: [...string]} describing what to create beforehand.
 package api
 
 import (

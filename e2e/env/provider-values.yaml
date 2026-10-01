@@ -3,3 +3,14 @@ credentialPlugins:
     - name: credential-plugin-tokenrequest
       image: oamdev/cluster-gateway-e2e-plugin-tokenrequest:latest
       imagePullPolicy: IfNotPresent
+  templates:
+    tokenrequest: |
+      // The tokenrequest test plugin mints tokens for one ServiceAccount of its own
+      // cluster and ignores its provider-config.
+      context: cluster: string
+      parameter: serviceAccount: *"e2e-provider-spoke" | string
+      providerConfig: {}
+      setup: [{
+      	title: "Allow cluster-gateway to mint tokens for ServiceAccount \(parameter.serviceAccount) (cluster \(context.cluster))."
+      	commands: ["kubectl -n vela-system create role e2e-provider-token-minter --verb=create --resource=serviceaccounts/token --resource-name=\(parameter.serviceAccount)"]
+      }]

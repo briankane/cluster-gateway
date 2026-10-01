@@ -28,4 +28,10 @@ var (
 	LabelKeyClusterCredentialType = config.MetaApiGroupName + "/cluster-credential-type"
 	// LabelKeyClusterEndpointType describes the endpoint type.
 	LabelKeyClusterEndpointType = config.MetaApiGroupName + "/cluster-endpoint-type"
+	// LabelKeyCredentialProvider marks a ConfigMap holding a credential plugin's
+	// setup template, and names the plugin.
+	LabelKeyCredentialProvider = config.MetaApiGroupName + "/credential-provider"
 )
+
+// CredentialProviderTemplateKey is the ConfigMap data key of a setup template.
+const CredentialProviderTemplateKey = "template.cue"

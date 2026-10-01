@@ -62,3 +62,6 @@ credentialPlugins:
   custom: []
   # Extra pod volumes for custom plugins.
   volumes: []
+  # Setup templates for custom plugins, keyed by provider name: CUE that renders
+  # providerConfig and setup steps from `vela cluster setup/join --param` values.
+  templates: {}
