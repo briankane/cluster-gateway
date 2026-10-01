@@ -29,6 +29,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 
 	"github.com/oam-dev/cluster-gateway/pkg/credentialprovider/plugin"
+	"github.com/oam-dev/cluster-gateway/plugins/aws/eks"
 )
 
 func main() {
@@ -51,7 +52,7 @@ func main() {
 			roles = append(roles, r)
 		}
 	}
-	m, err := NewMinter(Options{Base: base, AllowPodIdentity: *allowPodIdentity, AllowedRoleARNs: roles, SessionName: *sessionName})
+	m, err := eks.NewMinter(eks.Options{Base: base, AllowPodIdentity: *allowPodIdentity, AllowedRoleARNs: roles, SessionName: *sessionName})
 	if err != nil {
 		log.Fatal(err)
 	}

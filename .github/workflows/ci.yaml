@@ -98,6 +98,21 @@ jobs:
       - name: Build image
         run: docker build -f plugins/${{ matrix.plugin }}/Dockerfile .
 
+  aws-plugin-eks-conformance:
+    runs-on: ubuntu-22.04
+    needs: detect-noop
+    if: needs.detect-noop.outputs.noop != 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: plugins/aws/conformance/go.mod
+      - name: Verify tokens with aws-iam-authenticator
+        working-directory: plugins/aws/conformance
+        run: go test ./...
+
   e2e-cluster-gateway:
     runs-on: ubuntu-22.04
     needs: detect-noop

@@ -12,7 +12,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package main
+// Package eks mints EKS bearer tokens for the AWS credential plugin.
+package eks
 
 import (
 	"bytes"
