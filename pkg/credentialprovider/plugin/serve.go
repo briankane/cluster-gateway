@@ -60,6 +60,15 @@ func BadRequest(err error) error { return &statusError{code: http.StatusBadReque
 // Forbidden marks err as a refusal by the plugin's own policy, such as an allowlist.
 func Forbidden(err error) error { return &statusError{code: http.StatusForbidden, err: err} }
 
+// StatusCode is the HTTP status the gateway receives for err.
+func StatusCode(err error) int {
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.code
+	}
+	return http.StatusInternalServerError
+}
+
 // Handler serves api.CredentialPath with m. Errors from m are returned to the
 // gateway as their message; they must never contain a credential.
 func Handler(m Minter) http.Handler {
@@ -84,13 +93,8 @@ func Handler(m Minter) http.Handler {
 		}
 		status, err := m.Mint(r.Context(), req)
 		if err != nil {
-			code := http.StatusInternalServerError
-			var se *statusError
-			if errors.As(err, &se) {
-				code = se.code
-			}
 			log.Printf("cluster %q: %v", req.Cluster, err)
-			writeError(w, code, err)
+			writeError(w, StatusCode(err), err)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
