@@ -1,3 +1,11 @@
+{{- $aws := .Values.credentialPlugins.aws }}
+{{- $plugins := $aws.enabled }}
+{{- if and $aws.enabled $aws.irsa.roleArn $aws.podIdentity.enabled }}
+{{- fail "credentialPlugins.aws: set irsa.roleArn or podIdentity.enabled, not both" }}
+{{- end }}
+{{- if and $aws.enabled $aws.irsa.roleArn (not $aws.region) }}
+{{- fail "credentialPlugins.aws.region is required with irsa.roleArn" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,9 +22,40 @@ spec:
     metadata:
       labels:
         app: gateway
+      {{- if and $aws.enabled $aws.podIdentity.enabled }}
+      annotations:
+        # Keep the Pod Identity webhook's injection off the gateway container.
+        eks.amazonaws.com/skip-containers: gateway
+      {{- end }}
     spec:
       serviceAccount: cluster-gateway
+      {{- if $plugins }}
+      securityContext:
+        fsGroup: {{ .Values.credentialPlugins.fsGroup }}
+      {{- end }}
       volumes:
+        {{- if $plugins }}
+        - name: credential-plugins
+          emptyDir: {}
+        {{- end }}
+        {{- if and $aws.enabled $aws.irsa.roleArn }}
+        - name: aws-irsa-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: sts.amazonaws.com
+                  expirationSeconds: 86400
+                  path: token
+        {{- end }}
+        {{- if and $aws.enabled $aws.podIdentity.enabled }}
+        - name: aws-pod-identity-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: pods.eks.amazonaws.com
+                  expirationSeconds: 86400
+                  path: eks-pod-identity-token
+        {{- end }}
         - name: proxy-client
           secret:
             secretName: proxy-client
@@ -40,16 +79,77 @@ spec:
             - --proxy-key=/etc/tls/tls.key
             {{ end }}
             {{ end }}
+            {{- if $plugins }}
+            - --credential-plugin-dir=/var/run/cluster-gateway/plugins
+            {{- end }}
             - --feature-gates={{ if .Values.featureGate.healthiness }}HealthinessCheck=true,{{ end }}{{ if .Values.featureGate.secretCache }}SecretCache=true,{{ end }}
             # TODO: certificate rotation, otherwise the self-signed will expire in 1 year
-          {{ if .Values.ocmIntegration.clusterProxy.enabled }}
+          {{- if or .Values.ocmIntegration.clusterProxy.enabled $plugins }}
           volumeMounts:
+            {{- if .Values.ocmIntegration.clusterProxy.enabled }}
             - name: proxy-client
               mountPath: "/etc/tls/"
               readOnly: true
             - name: proxy-server-ca
               mountPath: "/etc/ca/"
               readOnly: true
-            {{ end }}
+            {{- end }}
+            {{- if $plugins }}
+            - name: credential-plugins
+              mountPath: /var/run/cluster-gateway/plugins
+            {{- end }}
+          {{- end }}
           ports:
             - containerPort: 9443
+        {{- if $aws.enabled }}
+        - name: credential-plugin-aws
+          image: {{ $aws.image }}:{{ $aws.tag | default (print "v" .Chart.Version) }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --socket=/var/run/cluster-gateway/plugins/aws.sock
+            - --allow-pod-identity={{ $aws.allowPodIdentity }}
+            - --allowed-role-arns={{ join "," $aws.allowedRoleArns }}
+            - --session-name={{ $aws.sessionName }}
+          env:
+            {{- if $aws.region }}
+            - name: AWS_REGION
+              value: {{ $aws.region | quote }}
+            {{- end }}
+            - name: AWS_STS_REGIONAL_ENDPOINTS
+              value: regional
+            {{- if $aws.irsa.roleArn }}
+            - name: AWS_ROLE_ARN
+              value: {{ $aws.irsa.roleArn | quote }}
+            - name: AWS_WEB_IDENTITY_TOKEN_FILE
+              value: /var/run/secrets/eks.amazonaws.com/serviceaccount/token
+            {{- end }}
+            {{- if $aws.podIdentity.enabled }}
+            - name: AWS_CONTAINER_CREDENTIALS_FULL_URI
+              value: http://169.254.170.23/v1/credentials
+            - name: AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE
+              value: /var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token
+            {{- end }}
+          volumeMounts:
+            - name: credential-plugins
+              mountPath: /var/run/cluster-gateway/plugins
+            {{- if $aws.irsa.roleArn }}
+            - name: aws-irsa-token
+              mountPath: /var/run/secrets/eks.amazonaws.com/serviceaccount
+              readOnly: true
+            {{- end }}
+            {{- if $aws.podIdentity.enabled }}
+            - name: aws-pod-identity-token
+              mountPath: /var/run/secrets/pods.eks.amazonaws.com/serviceaccount
+              readOnly: true
+            {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          {{- with $aws.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}

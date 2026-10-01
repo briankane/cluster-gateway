@@ -19,3 +19,33 @@ ocmIntegration:
 featureGate:
   healthiness: false
   secretCache: false
+# Credential plugins mint short-lived credentials for clusters registered with the
+# Provider credential type. Each runs as a sidecar and serves a unix socket in a
+# volume shared with the gateway. Cloud identity is mounted into the plugin
+# container only.
+credentialPlugins:
+  # Group that owns the plugin sockets (pod fsGroup); plugins and the gateway share it.
+  fsGroup: 65532
+  aws:
+    enabled: false
+    image: oamdev/cluster-gateway-plugin-aws
+    # Defaults to the chart version.
+    tag:
+    # Region for the plugin's own STS calls (IRSA web identity exchange, AssumeRole).
+    region: ""
+    irsa:
+      # Role the plugin assumes with its projected ServiceAccount token. The
+      # ServiceAccount is deliberately not annotated, so the EKS webhook does not
+      # inject this identity into the gateway container.
+      roleArn: ""
+    podIdentity:
+      # Use an EKS Pod Identity association for this release's ServiceAccount.
+      # The association itself is created in EKS, not by this chart.
+      enabled: false
+    # Sign for clusters without a roleArn using the plugin's own identity.
+    allowPodIdentity: true
+    # Roles a cluster's provider-config may name as roleArn. An entry
+    # arn:aws:iam::<account>:role/* allows every role in that account.
+    allowedRoleArns: []
+    sessionName: cluster-gateway
+    resources: {}
