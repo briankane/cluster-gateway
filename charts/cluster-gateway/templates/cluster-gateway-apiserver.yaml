@@ -1,5 +1,5 @@
 {{- $aws := .Values.credentialPlugins.aws }}
-{{- $plugins := $aws.enabled }}
+{{- $plugins := or $aws.enabled .Values.credentialPlugins.custom }}
 {{- if and $aws.enabled $aws.irsa.roleArn $aws.podIdentity.enabled }}
 {{- fail "credentialPlugins.aws: set irsa.roleArn or podIdentity.enabled, not both" }}
 {{- end }}
@@ -37,6 +37,9 @@ spec:
         {{- if $plugins }}
         - name: credential-plugins
           emptyDir: {}
+        {{- end }}
+        {{- with .Values.credentialPlugins.volumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- if and $aws.enabled $aws.irsa.roleArn }}
         - name: aws-irsa-token
@@ -152,4 +155,7 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        {{- end }}
+        {{- range .Values.credentialPlugins.custom }}
+        - {{- toYaml (mergeOverwrite (deepCopy .) (dict "volumeMounts" (append (default list .volumeMounts) (dict "name" "credential-plugins" "mountPath" "/var/run/cluster-gateway/plugins")))) | nindent 10 }}
         {{- end }}

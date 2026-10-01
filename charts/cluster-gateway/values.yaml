@@ -49,3 +49,12 @@ credentialPlugins:
     allowedRoleArns: []
     sessionName: cluster-gateway
     resources: {}
+  # Further plugins, each a container spec run as a sidecar. The socket volume is
+  # mounted at /var/run/cluster-gateway/plugins; a plugin named <provider> must
+  # listen on <provider>.sock there. For example:
+  #   - name: credential-plugin-acme
+  #     image: example.com/acme-credential-plugin:v1
+  #     args: ["--socket=/var/run/cluster-gateway/plugins/acme.sock"]
+  custom: []
+  # Extra pod volumes for custom plugins.
+  volumes: []
