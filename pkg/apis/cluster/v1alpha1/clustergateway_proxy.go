@@ -57,6 +57,12 @@ var _ resource.SubResource = &ClusterGatewayProxy{}
 var _ registryrest.Storage = &ClusterGatewayProxy{}
 var _ resourcerest.Connecter = &ClusterGatewayProxy{}
 
+// credentialResolver is implemented by the ClusterGateway storage. The proxy needs
+// the credential that Get redacts.
+type credentialResolver interface {
+	getWithCredential(ctx context.Context, name string) (*ClusterGateway, error)
+}
+
 var proxyMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 
 // ClusterGatewayProxy is a subresource for ClusterGateway which allows user to proxy
@@ -103,11 +109,14 @@ func (c *ClusterGatewayProxy) Connect(ctx context.Context, id string, options ru
 	if !ok {
 		return nil, fmt.Errorf("no parent storage found")
 	}
-	parentObj, err := parentStorage.Get(ctx, id, &metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("no such cluster %v", id)
+	resolver, ok := parentStorage.(credentialResolver)
+	if !ok {
+		return nil, fmt.Errorf("parent storage %T cannot resolve cluster credentials", parentStorage)
 	}
-	clusterGateway := parentObj.(*ClusterGateway)
+	clusterGateway, err := resolver.getWithCredential(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("no such cluster %v: %w", id, err)
+	}
 
 	reqInfo, _ := request.RequestInfoFrom(ctx)
 	factory := request.RequestInfoFactory{

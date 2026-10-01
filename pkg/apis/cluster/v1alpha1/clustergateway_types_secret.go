@@ -47,28 +47,63 @@ const (
 )
 
 func (in *ClusterGateway) Get(ctx context.Context, name string, _ *metav1.GetOptions) (runtime.Object, error) {
+	gw, _, err := in.get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return redactCredential(gw), nil
+}
+
+// getWithCredential returns the cluster with its credential in full, issuing a
+// Dynamic one if needed. It is for in-process use only: the API never serves it.
+func (in *ClusterGateway) getWithCredential(ctx context.Context, name string) (*ClusterGateway, error) {
+	gw, clusterSecret, err := in.get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if gw.Spec.Access.Credential != nil && gw.Spec.Access.Credential.Type == CredentialTypeDynamic {
+		credential, err := buildCredentialFromExecConfig(clusterSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to issue credential from external command: %s", err)
+		}
+		gw.Spec.Access.Credential = credential
+	}
+	return gw, nil
+}
+
+func (in *ClusterGateway) get(ctx context.Context, name string) (*ClusterGateway, *v1.Secret, error) {
 	if singleton.GetSecretControl() == nil {
-		return nil, fmt.Errorf("loopback secret client are not inited")
+		return nil, nil, fmt.Errorf("loopback secret client are not inited")
 	}
 
 	clusterSecret, err := singleton.GetSecretControl().Get(ctx, name)
 	if err != nil {
 		klog.Warningf("Failed getting secret %q/%q: %v", config.SecretNamespace, name, err)
-		return nil, err
+		return nil, nil, err
 	}
 
 	if options.OCMIntegration {
 		if singleton.GetClusterControl() == nil {
-			return nil, fmt.Errorf("loopback cluster client are not inited")
+			return nil, nil, fmt.Errorf("loopback cluster client are not inited")
 		}
 		managedCluster, err := singleton.GetClusterControl().Get(ctx, name)
-		if err != nil {
-			return convertFromSecret(clusterSecret)
+		if err == nil {
+			gw, err := convertFromManagedClusterAndSecret(managedCluster, clusterSecret)
+			return gw, clusterSecret, err
 		}
-		return convertFromManagedClusterAndSecret(managedCluster, clusterSecret)
 	}
 
-	return convertFromSecret(clusterSecret)
+	gw, err := convertFromSecret(clusterSecret)
+	return gw, clusterSecret, err
+}
+
+// redactCredential strips everything but the type from the credential, so that
+// read access to ClusterGateways does not grant access to the clusters behind them.
+func redactCredential(gw *ClusterGateway) *ClusterGateway {
+	if gw.Spec.Access.Credential != nil {
+		gw.Spec.Access.Credential = &ClusterAccessCredential{Type: gw.Spec.Access.Credential.Type}
+	}
+	return gw
 }
 
 func (in *ClusterGateway) List(ctx context.Context, opt *internalversion.ListOptions) (runtime.Object, error) {
@@ -101,14 +136,14 @@ func (in *ClusterGateway) List(ctx context.Context, opt *internalversion.ListOpt
 					klog.Warningf("skipping %v: failed converting clustergateway resource", secret.Name)
 					continue
 				}
-				list.Items = append(list.Items, *gw)
+				list.Items = append(list.Items, *redactCredential(gw))
 			} else {
 				gw, err := convertFromSecret(secret)
 				if err != nil {
 					klog.Warningf("skipping %v: failed converting clustergateway resource", secret.Name)
 					continue
 				}
-				list.Items = append(list.Items, *gw)
+				list.Items = append(list.Items, *redactCredential(gw))
 			}
 		}
 		return list, nil
@@ -120,7 +155,7 @@ func (in *ClusterGateway) List(ctx context.Context, opt *internalversion.ListOpt
 			klog.Errorf("failed converting secret to gateway: %v", err)
 			continue
 		}
-		list.Items = append(list.Items, *gw)
+		list.Items = append(list.Items, *redactCredential(gw))
 	}
 	return list, nil
 }
@@ -253,12 +288,7 @@ func convert(caData []byte, apiServerEndpoint string, insecure bool, secret *v1.
 		}
 
 	case CredentialTypeDynamic:
-		credential, err := buildCredentialFromExecConfig(secret)
-		if err != nil {
-			return nil, fmt.Errorf("failed to issue credential from external command: %s", err)
-		}
-
-		c.Spec.Access.Credential = credential
+		c.Spec.Access.Credential = &ClusterAccessCredential{Type: CredentialTypeDynamic}
 
 	default:
 		return nil, fmt.Errorf("unrecognized secret credential type %v", credentialType)

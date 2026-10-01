@@ -74,5 +74,5 @@ func (in *ClusterGatewayHealth) Update(ctx context.Context, name string, objInfo
 	if err != nil {
 		return nil, false, err
 	}
-	return clusterGateway, false, nil
+	return redactCredential(clusterGateway), false, nil
 }

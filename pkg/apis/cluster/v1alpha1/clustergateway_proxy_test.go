@@ -185,6 +185,7 @@ func TestProxyHandler(t *testing.T) {
 			assert.Equal(t, 200, resp.StatusCode)
 			assert.Equal(t, gopath.Join(c.endpointPath, path), receivingReq.URL.Path)
 			assert.Equal(t, c.expectedQuery, receivingReq.URL.RawQuery)
+			assert.Equal(t, "Bearer myToken", receivingReq.Header.Get("Authorization"))
 		})
 	}
 }
@@ -204,6 +205,13 @@ func (f *fakeParentStorage) New() runtime.Object {
 func (f *fakeParentStorage) Destroy() {}
 
 func (f *fakeParentStorage) Get(ctx context.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return redactCredential(f.obj.DeepCopy()), nil
+}
+
+func (f *fakeParentStorage) getWithCredential(ctx context.Context, name string) (*ClusterGateway, error) {
 	return f.obj, f.err
 }
 

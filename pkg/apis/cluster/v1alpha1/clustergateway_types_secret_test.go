@@ -277,7 +277,7 @@ func TestConvertSecretToGateway(t *testing.T) {
 			},
 		},
 		{
-			name: "dynamic service account token issued from external command",
+			name: "dynamic credential is not issued on conversion (token exec config)",
 			inputSecret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testName,
@@ -299,8 +299,7 @@ func TestConvertSecretToGateway(t *testing.T) {
 				Spec: ClusterGatewaySpec{
 					Access: ClusterAccess{
 						Credential: &ClusterAccessCredential{
-							Type:                CredentialTypeDynamic,
-							ServiceAccountToken: testToken,
+							Type: CredentialTypeDynamic,
 						},
 						Endpoint: &ClusterEndpoint{
 							Type: ClusterEndpointTypeConst,
@@ -314,7 +313,7 @@ func TestConvertSecretToGateway(t *testing.T) {
 			},
 		},
 		{
-			name: "dynamic x509 cert-key pair issued from external command",
+			name: "dynamic credential is not issued on conversion (x509 exec config)",
 			inputSecret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testName,
@@ -337,10 +336,6 @@ func TestConvertSecretToGateway(t *testing.T) {
 					Access: ClusterAccess{
 						Credential: &ClusterAccessCredential{
 							Type: CredentialTypeDynamic,
-							X509: &X509{
-								Certificate: []byte(testCertData),
-								PrivateKey:  []byte(testKeyData),
-							},
 						},
 						Endpoint: &ClusterEndpoint{
 							Type: ClusterEndpointTypeConst,
@@ -354,7 +349,7 @@ func TestConvertSecretToGateway(t *testing.T) {
 			},
 		},
 		{
-			name: "failed to fetch cluster credential from dynamic auth mode",
+			name: "invalid dynamic exec config does not fail conversion",
 			inputSecret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testName,
@@ -369,7 +364,25 @@ func TestConvertSecretToGateway(t *testing.T) {
 					"exec":     []byte("invalid exec config format"),
 				},
 			},
-			expectedFailure: true,
+			expected: &ClusterGateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: testName,
+				},
+				Spec: ClusterGatewaySpec{
+					Access: ClusterAccess{
+						Credential: &ClusterAccessCredential{
+							Type: CredentialTypeDynamic,
+						},
+						Endpoint: &ClusterEndpoint{
+							Type: ClusterEndpointTypeConst,
+							Const: &ClusterEndpointConst{
+								CABundle: []byte(testCAData),
+								Address:  testEndpoint,
+							},
+						},
+					},
+				},
+			},
 		},
 	}
 	for _, c := range cases {
@@ -530,6 +543,8 @@ func TestGetClusterGateway(t *testing.T) {
 	fakeKubeClient := fake.NewSimpleClientset(input)
 	singleton.SetSecretControl(cert.NewDirectApiSecretControl(testNamespace, fakeKubeClient))
 	expected, err := convertFromSecret(input)
+	require.NoError(t, err)
+	expected.Spec.Access.Credential = &ClusterAccessCredential{Type: CredentialTypeServiceAccountToken}
 	storage := &ClusterGateway{}
 	gwRaw, err := storage.Get(context.TODO(), testName, &metav1.GetOptions{})
 	assert.NoError(t, err)
@@ -563,6 +578,7 @@ func TestListClusterGateway(t *testing.T) {
 	assert.NoError(t, err)
 	expected, err := convertFromSecret(input)
 	assert.NoError(t, err)
+	expected.Spec.Access.Credential = &ClusterAccessCredential{Type: CredentialTypeX509Certificate}
 	gw := gws.(*ClusterGatewayList).Items[0]
 	assert.Equal(t, expected, &gw)
 }
@@ -710,4 +726,80 @@ func TestBuildCredentialFromExecConfig(t *testing.T) {
 			assert.Equal(t, tt.expected, got)
 		})
 	}
+}
+
+func newClusterSecret(name string, credType CredentialType, data map[string][]byte) *corev1.Secret {
+	data["endpoint"] = []byte(testEndpoint)
+	data["ca.crt"] = []byte(testCAData)
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      name,
+			Labels: map[string]string{
+				common.LabelKeyClusterCredentialType: string(credType),
+			},
+		},
+		Data: data,
+	}
+}
+
+func TestClusterGatewayAPIRedactsCredential(t *testing.T) {
+	options.OCMIntegration = false
+	config.SecretNamespace = testNamespace
+	secrets := []*corev1.Secret{
+		newClusterSecret("sa", CredentialTypeServiceAccountToken, map[string][]byte{"token": []byte(testToken)}),
+		newClusterSecret("x509", CredentialTypeX509Certificate, map[string][]byte{"tls.crt": []byte(testCertData), "tls.key": []byte(testKeyData)}),
+		newClusterSecret("dynamic", CredentialTypeDynamic, map[string][]byte{"exec": []byte(testExecConfigForToken)}),
+		newClusterSecret("dynamic-broken", CredentialTypeDynamic, map[string][]byte{"exec": []byte("invalid exec config format")}),
+	}
+	expected := map[string]CredentialType{
+		"sa":             CredentialTypeServiceAccountToken,
+		"x509":           CredentialTypeX509Certificate,
+		"dynamic":        CredentialTypeDynamic,
+		"dynamic-broken": CredentialTypeDynamic,
+	}
+	fakeKubeClient := fake.NewSimpleClientset(secrets[0], secrets[1], secrets[2], secrets[3])
+	singleton.SetSecretControl(cert.NewDirectApiSecretControl(testNamespace, fakeKubeClient))
+	storage := &ClusterGateway{}
+
+	for name, credType := range expected {
+		t.Run("get "+name, func(t *testing.T) {
+			raw, err := storage.Get(context.TODO(), name, &metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, &ClusterAccessCredential{Type: credType}, raw.(*ClusterGateway).Spec.Access.Credential)
+		})
+	}
+
+	t.Run("list", func(t *testing.T) {
+		raw, err := storage.List(context.TODO(), &internalversion.ListOptions{})
+		require.NoError(t, err)
+		items := raw.(*ClusterGatewayList).Items
+		require.Len(t, items, len(expected))
+		for _, gw := range items {
+			assert.Equal(t, &ClusterAccessCredential{Type: expected[gw.Name]}, gw.Spec.Access.Credential, gw.Name)
+		}
+	})
+}
+
+func TestClusterGatewayGetWithCredential(t *testing.T) {
+	options.OCMIntegration = false
+	config.SecretNamespace = testNamespace
+	fakeKubeClient := fake.NewSimpleClientset(
+		newClusterSecret("sa", CredentialTypeServiceAccountToken, map[string][]byte{"token": []byte(testToken)}),
+		newClusterSecret("dynamic", CredentialTypeDynamic, map[string][]byte{"exec": []byte(testExecConfigForToken)}),
+		newClusterSecret("dynamic-broken", CredentialTypeDynamic, map[string][]byte{"exec": []byte("invalid exec config format")}),
+	)
+	singleton.SetSecretControl(cert.NewDirectApiSecretControl(testNamespace, fakeKubeClient))
+	storage := &ClusterGateway{}
+
+	gw, err := storage.getWithCredential(context.TODO(), "sa")
+	require.NoError(t, err)
+	assert.Equal(t, &ClusterAccessCredential{Type: CredentialTypeServiceAccountToken, ServiceAccountToken: testToken}, gw.Spec.Access.Credential)
+
+	gw, err = storage.getWithCredential(context.TODO(), "dynamic")
+	require.NoError(t, err)
+	assert.Equal(t, &ClusterAccessCredential{Type: CredentialTypeDynamic, ServiceAccountToken: testToken}, gw.Spec.Access.Credential)
+
+	_, err = storage.getWithCredential(context.TODO(), "dynamic-broken")
+	assert.ErrorContains(t, err, "failed to issue credential from external command")
 }
